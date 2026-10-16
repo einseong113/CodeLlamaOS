@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+chmod +x /usr/local/bin/llm /usr/local/bin/ask
+
+# Debian 은 fd 를 fdfind 로 설치한다
+command -v fdfind >/dev/null 2>&1 && ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+
+# llama-server 서비스는 모델을 고른 뒤(llm use) 활성화한다 (자동 다운로드 방지)
+systemctl disable llama-server.service >/dev/null 2>&1 || true
+
+# 모델 캐시 위치
+mkdir -p /var/lib/codellama

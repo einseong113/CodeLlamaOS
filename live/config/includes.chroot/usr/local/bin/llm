@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""llm - 로컬 llama.cpp 서버(llama-server) 관리 도구
+
+  llm list              추천 모델 프리셋과 내 RAM 기준 추천
+  llm use <모델>        모델 선택 + 서버 시작 (프리셋 | HF repo[:quant] | /경로/모델.gguf)
+  llm status            서버 상태
+  llm logs              서버 로그 보기 (모델 다운로드 진행률 확인)
+  llm stop              서버 중지
+  llm serve             (서비스용) 설정대로 llama-server 를 포그라운드 실행
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+
+ENV_FILE = "/etc/codellama/llama.env"
+CACHE_DIR = "/var/lib/codellama/cache"
+SERVICE = "llama-server.service"
+DEFAULTS = {"MODEL": "", "HOST": "127.0.0.1", "PORT": "8080", "CTX": "8192", "EXTRA": ""}
+
+# (HF repo:quant, 설명, 권장 RAM GB)
+PRESETS = {
+    "tiny": ("Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF:Q4_K_M", "~1.1GB 다운로드, 가장 빠름", 4),
+    "small": ("Qwen/Qwen2.5-Coder-3B-Instruct-GGUF:Q4_K_M", "~2GB 다운로드", 6),
+    "medium": ("Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M", "~4.7GB 다운로드, 균형 (추천)", 8),
+    "large": ("Qwen/Qwen2.5-Coder-14B-Instruct-GGUF:Q4_K_M", "~9GB 다운로드, 고품질", 16),
+}
+
+
+def ram_gb():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal"):
+                    return int(line.split()[1]) / 1024 / 1024
+    except OSError:
+        pass
+    return 0
+
+
+def load_env():
+    cfg = dict(DEFAULTS)
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def save_env(cfg):
+    os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
+    with open(ENV_FILE, "w") as f:
+        f.write("# llm use 로 관리되는 파일 (직접 수정해도 됨)\n")
+        for k in DEFAULTS:
+            f.write(f"{k}={cfg.get(k, '')}\n")
+
+
+def need_root(argv):
+    if os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", "-E", sys.executable, *argv])
+
+
+def health(cfg, timeout=2):
+    url = f"http://{cfg['HOST']}:{cfg['PORT']}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return json.load(r).get("status", "ok")
+    except Exception:
+        return None
+
+
+def cmd_list(_):
+    mem = ram_gb()
+    best = None
+    for name, (_, _, need) in PRESETS.items():
+        if mem >= need:
+            best = name
+    print(f"내 RAM: {mem:.1f} GB\n")
+    for name, (repo, desc, need) in PRESETS.items():
+        mark = "  <- 추천" if name == best else ""
+        print(f"  {name:<7} RAM {need:>2}GB+  {desc}{mark}\n          {repo}")
+    print("\n사용: llm use <프리셋>   예) llm use " + (best or "tiny"))
+
+
+def cmd_use(args):
+    if not args:
+        sys.exit("사용법: llm use <프리셋 | HF repo[:quant] | /경로/모델.gguf>  (프리셋은 'llm list')")
+    need_root([sys.argv[0], *sys.argv[1:]])
+    target = args[0]
+    model = PRESETS[target][0] if target in PRESETS else target
+    if model.startswith("/") and not os.path.isfile(model):
+        sys.exit(f"파일이 없음: {model}")
+    cfg = load_env()
+    cfg["MODEL"] = model
+    save_env(cfg)
+    subprocess.run(["systemctl", "enable", SERVICE], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["systemctl", "restart", SERVICE], check=True)
+    print(f"모델: {model}")
+    print("처음이면 모델을 내려받는 중입니다 (크기에 따라 수 분). 진행률: llm logs")
+    print("준비 대기 중... (Ctrl+C 로 빠져나가도 서버는 계속 실행됨)")
+    try:
+        while True:
+            st = health(cfg)
+            if st == "ok":
+                print(f"준비 완료 -> http://{cfg['HOST']}:{cfg['PORT']}  (웹 UI + OpenAI 호환 API /v1)")
+                print("터미널에서:  ask \"질문\"   |   aider")
+                return
+            active = subprocess.run(["systemctl", "is-active", SERVICE], capture_output=True, text=True).stdout.strip()
+            if active == "failed":
+                sys.exit("서버 시작 실패. 'llm logs' 로 원인을 확인하세요.")
+            time.sleep(3)
+    except KeyboardInterrupt:
+        print()
+
+
+def cmd_status(_):
+    cfg = load_env()
+    active = subprocess.run(["systemctl", "is-active", SERVICE], capture_output=True, text=True).stdout.strip()
+    ver = "?"
+    try:
+        ver = open("/opt/llama.cpp/VERSION").read().split()[0][:10]
+    except OSError:
+        pass
+    print(f"llama.cpp : {ver}")
+    print(f"모델      : {cfg['MODEL'] or '(미선택 - llm use 로 선택)'}")
+    print(f"서비스    : {active}")
+    st = health(cfg)
+    print(f"API       : http://{cfg['HOST']}:{cfg['PORT']}  ({'ok' if st == 'ok' else st or '응답 없음'})")
+
+
+def cmd_logs(_):
+    os.execvp("journalctl", ["journalctl", "-fu", SERVICE, "-n", "50", "--no-hostname"])
+
+
+def cmd_stop(_):
+    need_root([sys.argv[0], *sys.argv[1:]])
+    subprocess.run(["systemctl", "stop", SERVICE], check=False)
+    print("중지됨")
+
+
+def cmd_serve(_):
+    cfg = load_env()
+    if not cfg["MODEL"]:
+        sys.exit("모델이 선택되지 않았습니다. 'llm use <프리셋>' 을 먼저 실행하세요.")
+    exe = shutil.which("llama-server") or "/opt/llama.cpp/bin/llama-server"
+    cmd = [exe, "--host", cfg["HOST"], "--port", cfg["PORT"], "-c", cfg["CTX"], "--jinja"]
+    if cfg["MODEL"].startswith("/"):
+        cmd += ["-m", cfg["MODEL"]]
+    else:
+        cmd += ["-hf", cfg["MODEL"]]
+    if cfg["EXTRA"]:
+        cmd += cfg["EXTRA"].split()
+    env = dict(os.environ, LLAMA_CACHE=CACHE_DIR)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.execve(exe, cmd, env)
+
+
+COMMANDS = {"list": cmd_list, "use": cmd_use, "status": cmd_status, "logs": cmd_logs, "stop": cmd_stop, "serve": cmd_serve}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print(__doc__)
+        sys.exit(0 if len(sys.argv) < 2 else 1)
+    COMMANDS[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

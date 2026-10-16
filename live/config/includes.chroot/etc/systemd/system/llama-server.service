@@ -1,0 +1,20 @@
+[Unit]
+Description=llama.cpp server (local coding LLM)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/codellama/llama.env
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/llm serve
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+StateDirectory=codellama
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

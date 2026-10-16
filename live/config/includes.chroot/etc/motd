@@ -1,0 +1,9 @@
+
+  CodeLlama OS  -  llama.cpp + C++ / Python 개발 환경
+
+  llm list            모델 프리셋 / 내 RAM 기준 추천
+  llm use medium      모델 선택 + 서버 시작 (처음엔 다운로드)
+  ask "질문"          터미널에서 질문   (ask 만 치면 대화 모드)
+  aider               AI 페어 프로그래밍 (git 저장소 안에서)
+  웹 UI: http://127.0.0.1:8080        예제: ~/examples
+

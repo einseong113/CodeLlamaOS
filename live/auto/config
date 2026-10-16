@@ -1,0 +1,20 @@
+#!/bin/sh
+# CodeLlama OS - live-build 설정 (Debian 12 bookworm, amd64, BIOS+UEFI 하이브리드 ISO)
+
+lb config noauto \
+	--distribution bookworm \
+	--architectures amd64 \
+	--archive-areas "main contrib non-free-firmware" \
+	--binary-images iso-hybrid \
+	--bootloaders "syslinux,grub-efi" \
+	--debian-installer none \
+	--apt-recommends false \
+	--firmware-chroot true \
+	--linux-flavours amd64 \
+	--memtest none \
+	--chroot-squashfs-compression-type zstd \
+	--iso-application "CodeLlama OS" \
+	--iso-volume "CODELLAMA" \
+	--image-name "codellama-os" \
+	--bootappend-live "boot=live components quiet username=dev hostname=codellama locales=ko_KR.UTF-8 keyboard-layouts=kr timezone=Asia/Seoul" \
+	"${@}"

@@ -1,0 +1,12 @@
+#!/bin/sh
+# (선택) aider: 터미널용 AI 페어 프로그래밍 도구. 로컬 llama-server 에 연결해 사용.
+# 실패해도 ISO 빌드는 계속 진행한다.
+. /etc/codellama/build.conf
+
+if [ "${INSTALL_AIDER:-1}" = "1" ]; then
+	python3 -m venv /opt/aider \
+		&& /opt/aider/bin/pip install --no-cache-dir aider-chat \
+		&& ln -sf /opt/aider/bin/aider /usr/local/bin/aider \
+		|| echo "WARN: aider 설치 실패 - 건너뜀"
+fi
+exit 0

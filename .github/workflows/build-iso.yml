@@ -1,0 +1,43 @@
+name: Build ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_ref:
+        description: "llama.cpp 태그/브랜치 (비우면 master)"
+        required: false
+        default: ""
+      install_aider:
+        description: "aider 포함 (1/0)"
+        required: false
+        default: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 디스크 공간 확보
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
+      - name: 빌더 이미지
+        run: docker build -t codellama-os-builder .
+
+      - name: ISO 빌드
+        run: |
+          mkdir -p out
+          docker run --rm --privileged \
+            -v "$PWD/live:/src/live:ro" -v "$PWD/out:/out" \
+            -e LLAMA_CPP_REF="${{ inputs.llama_ref }}" \
+            -e INSTALL_AIDER="${{ inputs.install_aider }}" \
+            codellama-os-builder
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codellama-os-iso
+          path: out/*
+          retention-days: 7

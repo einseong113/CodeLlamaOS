@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""ask - 로컬 llama-server 에 코딩 질문을 던지는 CLI (표준 라이브러리만 사용)
+
+  ask "이 함수 시간복잡도는?"
+  ask -f main.cpp "버그 찾아줘"          파일 첨부 (여러 번 가능)
+  cat main.py | ask "리뷰해줘"            stdin 첨부
+  ask                                      대화 모드 (/reset /file <경로> /exit)
+환경변수: LLAMA_URL (기본 http://127.0.0.1:8080)
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+SYSTEM = (
+    "You are an expert pair-programming assistant for C++ and Python. "
+    "Answer concisely. Prefer complete, compilable/runnable code in fenced blocks. "
+    "Reply in the user's language."
+)
+
+
+def stream_chat(url, messages):
+    body = json.dumps({"messages": messages, "stream": True}).encode()
+    req = urllib.request.Request(
+        f"{url}/v1/chat/completions", body, {"Content-Type": "application/json"}
+    )
+    out = []
+    with urllib.request.urlopen(req) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            delta = json.loads(data)["choices"][0].get("delta", {})
+            piece = delta.get("content") or ""
+            if piece:
+                out.append(piece)
+                sys.stdout.write(piece)
+                sys.stdout.flush()
+    sys.stdout.write("\n")
+    return "".join(out)
+
+
+def read_file(path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f"### {path}\n```\n{f.read()}\n```"
+
+
+def main():
+    ap = argparse.ArgumentParser(description="로컬 LLM 코딩 질문 도구")
+    ap.add_argument("prompt", nargs="*")
+    ap.add_argument("-f", "--file", action="append", default=[], help="첨부할 파일")
+    ap.add_argument("-s", "--system", default=SYSTEM)
+    ap.add_argument("--url", default=os.environ.get("LLAMA_URL", "http://127.0.0.1:8080"))
+    args = ap.parse_args()
+
+    messages = [{"role": "system", "content": args.system}]
+    parts = [read_file(p) for p in args.file]
+    if not sys.stdin.isatty():
+        parts.append(sys.stdin.read())
+    question = " ".join(args.prompt)
+    interactive = not question and not parts
+
+    try:
+        if not interactive:
+            messages.append({"role": "user", "content": "\n\n".join(parts + [question]).strip()})
+            stream_chat(args.url, messages)
+            return
+
+        print("대화 모드 - /reset 초기화, /file <경로> 첨부, /exit 종료")
+        while True:
+            try:
+                line = input("\n>>> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if not line:
+                continue
+            if line in ("/exit", "/quit"):
+                return
+            if line == "/reset":
+                messages = messages[:1]
+                print("(초기화됨)")
+                continue
+            if line.startswith("/file "):
+                try:
+                    line = read_file(line[6:].strip()) + "\n\n(파일을 첨부했습니다. 질문을 기다립니다.)"
+                except OSError as e:
+                    print(f"파일 오류: {e}")
+                    continue
+            messages.append({"role": "user", "content": line})
+            reply = stream_chat(args.url, messages)
+            messages.append({"role": "assistant", "content": reply})
+    except urllib.error.URLError as e:
+        sys.exit(f"서버에 연결할 수 없음 ({args.url}): {e.reason}\n'llm status' 확인, 모델이 없으면 'llm use <프리셋>'")
+
+
+if __name__ == "__main__":
+    main()

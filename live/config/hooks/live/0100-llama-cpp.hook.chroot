@@ -1,0 +1,65 @@
+#!/bin/sh
+# chroot 안에서 llama.cpp 를 소스에서 빌드해 /opt/llama.cpp 에 설치한다.
+#
+# - GGML_NATIVE=OFF + GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS:
+#   ISO 는 어떤 x86-64 CPU 에서든 부팅해야 하므로, 빌드 머신 CPU 에 고정하지 않고
+#   (SSE4/AVX/AVX2/AVX512 ...) 변형을 모두 빌드해 실행 시점에 최적의 것을 고른다.
+set -eu
+
+. /etc/codellama/build.conf
+
+PREFIX=/opt/llama.cpp
+SRC=/usr/src/llama.cpp
+
+# 빌드 병렬도: 메모리 1.5GB 당 1 job (Docker Desktop 의 낮은 메모리에서 OOM 방지)
+mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+jobs=$((mem_kb / 1500000))
+cpus=$(nproc)
+[ "$jobs" -gt "$cpus" ] && jobs=$cpus
+[ "$jobs" -lt 1 ] && jobs=1
+echo "[llama.cpp] build jobs=$jobs (mem=${mem_kb}kB, cpus=$cpus)"
+
+rm -rf "$SRC"
+if [ -n "${LLAMA_CPP_REF:-}" ]; then
+	git clone --depth 1 --branch "$LLAMA_CPP_REF" https://github.com/ggml-org/llama.cpp "$SRC"
+else
+	git clone --depth 1 https://github.com/ggml-org/llama.cpp "$SRC"
+fi
+
+# shellcheck disable=SC2086
+cmake -S "$SRC" -B "$SRC/build" -G Ninja \
+	-DCMAKE_BUILD_TYPE=Release \
+	-DCMAKE_INSTALL_PREFIX="$PREFIX" \
+	-DCMAKE_INSTALL_LIBDIR=lib \
+	-DCMAKE_INSTALL_RPATH="$PREFIX/lib" \
+	-DBUILD_SHARED_LIBS=ON \
+	-DGGML_NATIVE=OFF \
+	-DGGML_BACKEND_DL=ON \
+	-DGGML_CPU_ALL_VARIANTS=ON \
+	-DGGML_BACKEND_DIR="$PREFIX/lib" \
+	-DLLAMA_BUILD_TESTS=OFF \
+	-DLLAMA_BUILD_EXAMPLES=OFF \
+	${LLAMA_CMAKE_EXTRA:-}
+
+cmake --build "$SRC/build" -j "$jobs"
+cmake --install "$SRC/build"
+
+# 동적 백엔드(.so)가 install 규칙에 빠지는 경우를 대비해 직접 복사
+mkdir -p "$PREFIX/lib"
+cp -n "$SRC"/build/bin/libggml*.so* "$PREFIX/lib/" 2>/dev/null || true
+
+git -C "$SRC" log -1 --format='%H %cs' > "$PREFIX/VERSION"
+
+# PATH 에서 바로 쓰도록 심볼릭 링크
+for f in "$PREFIX"/bin/llama-*; do
+	[ -x "$f" ] && ln -sf "$f" "/usr/local/bin/$(basename "$f")"
+done
+echo "$PREFIX/lib" > /etc/ld.so.conf.d/llama-cpp.conf
+ldconfig
+
+# 빌드 결과 검증 (실패하면 ISO 빌드를 중단)
+"$PREFIX/bin/llama-server" --version
+ls "$PREFIX"/lib | grep -q 'libggml-cpu' || { echo "ERROR: CPU 백엔드가 설치되지 않음" >&2; exit 1; }
+
+rm -rf "$SRC"
+echo "[llama.cpp] installed: $(cat "$PREFIX/VERSION")"
